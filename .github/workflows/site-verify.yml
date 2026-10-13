@@ -1,0 +1,63 @@
+name: CyanDeck DuckDNS and OAuth site verification
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'CNAME'
+      - 'index.html'
+      - 'privacy.html'
+      - 'terms.html'
+      - '.github/workflows/site-verify.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate site repository and ownership token text is absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(tr -d '\r\n' < CNAME)" = "cyandeck.duckdns.org"
+          for file in index.html privacy.html terms.html; do
+            grep -q CyanDeck "$file"
+            if grep -q DesktopDeck "$file"; then echo "::error::$file still contains DesktopDeck branding"; exit 1; fi
+          done
+      - name: Resolve public A and Google ownership TXT records
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "A records:"
+          dig +time=5 +tries=2 +short A cyandeck.duckdns.org @1.1.1.1 | tee a-records.txt
+          if ! grep -Eq '^185\.199\.(108|109|110|111)\.153$' a-records.txt; then
+            echo "::error::DuckDNS IPv4 does not resolve to a GitHub Pages IP."
+            exit 1
+          fi
+          echo "Google Search Console TXT (value hidden from logs):"
+          dig +time=5 +tries=2 +short TXT cyandeck.duckdns.org @1.1.1.1 > txt-records.txt
+          if ! grep -Fq 'google-site-verification=Kqv8J5ymaPHJATLCIlxPHKi9CKNdtUuAnCFmQd4QtVw' txt-records.txt; then
+            echo "::error::Google ownership TXT record has not propagated to Cloudflare DNS."
+            exit 1
+          fi
+          echo "Google ownership TXT found."
+      - name: Verify public HTTPS content matches CyanDeck
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in / /privacy.html /terms.html; do
+            url="https://cyandeck.duckdns.org${path}"
+            echo "Checking ${url}"
+            if ! curl --fail --location --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 12 --max-time 30 "${url}" -o response.html; then
+              echo "::error::HTTPS page not available: ${path}"
+              exit 1
+            fi
+            grep -q CyanDeck response.html || { echo "::error::Expected brand absent from ${path}"; exit 1; }
+            if grep -q DesktopDeck response.html; then
+              echo "::error::Old brand still visible on ${path}"
+              exit 1
+            fi
+            echo "PASS: ${path}"
+          done
